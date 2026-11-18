@@ -166,6 +166,62 @@ fn is_paste_shortcut(key: KeyEvent, is_macos: bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// A paste key the terminal swallowed
+// ---------------------------------------------------------------------------
+
+/// Spots a paste key the terminal kept for itself.
+///
+/// Windows Terminal binds Ctrl+V to its own paste. It swallows the key press,
+/// pastes the clipboard's text (or nothing, for an image) and then lets the
+/// key's *release* through. A release of the paste key with neither its press
+/// nor a terminal paste before it is therefore a paste the terminal dropped:
+/// the caller performs FlightDeck's own paste, which attaches an image.
+///
+/// Terminals that report no key releases (most outside Windows) never reach
+/// [`Self::on_release`], so the detector stays inert there.
+#[derive(Debug, Default)]
+pub struct SwallowedPasteKey {
+    /// The paste key's press (or repeat) arrived since its last release.
+    press_seen: bool,
+    /// The terminal delivered a paste since the last key press.
+    terminal_pasted: bool,
+}
+
+impl SwallowedPasteKey {
+    /// A key press or repeat arrived.
+    pub fn on_press(&mut self, key: KeyEvent) {
+        self.terminal_pasted = false;
+        if is_paste_key(key) {
+            self.press_seen = true;
+        }
+    }
+
+    /// The terminal delivered a paste (bracketed paste of the clipboard text).
+    pub fn on_terminal_paste(&mut self) {
+        self.terminal_pasted = true;
+    }
+
+    /// A key release arrived. `true` when it is the paste key's release and
+    /// the terminal swallowed the press without pasting anything itself.
+    pub fn on_release(&mut self, key: KeyEvent) -> bool {
+        if !is_paste_key(key) {
+            return false;
+        }
+        let swallowed = !self.press_seen && !self.terminal_pasted;
+        self.press_seen = false;
+        self.terminal_pasted = false;
+        swallowed
+    }
+}
+
+/// Whether `key` is bound to paste in a focused terminal, whatever its kind.
+fn is_paste_key(key: KeyEvent) -> bool {
+    chord_from_key_event(key)
+        .and_then(|c| Keymap::for_this_platform(false).lookup(InputMode::Terminal, c))
+        .is_some_and(|e| e.action == Action::Paste)
+}
+
+// ---------------------------------------------------------------------------
 // Key-to-bytes encoding for PTY passthrough (Terminal mode)
 // ---------------------------------------------------------------------------
 
@@ -207,6 +263,58 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         }
+    }
+
+    fn released(key: KeyEvent) -> KeyEvent {
+        KeyEvent {
+            kind: KeyEventKind::Release,
+            ..key
+        }
+    }
+
+    #[test]
+    fn a_paste_release_without_its_press_is_a_swallowed_paste() {
+        // Windows Terminal with Ctrl+V bound and an image on the clipboard:
+        // only the release arrives.
+        let mut d = SwallowedPasteKey::default();
+        assert!(d.on_release(released(ctrl(KeyCode::Char('v')))));
+        // Once: the next release with no new event is a fresh swallow too.
+        assert!(d.on_release(released(ctrl(KeyCode::Char('v')))));
+    }
+
+    #[test]
+    fn a_paste_release_after_its_press_is_not_swallowed() {
+        // A terminal that forwards Ctrl+V: the press already pasted.
+        let mut d = SwallowedPasteKey::default();
+        d.on_press(ctrl(KeyCode::Char('v')));
+        assert!(!d.on_release(released(ctrl(KeyCode::Char('v')))));
+        // The pair is consumed: a later lone release is swallowed again.
+        assert!(d.on_release(released(ctrl(KeyCode::Char('v')))));
+    }
+
+    #[test]
+    fn a_paste_release_after_the_terminal_pasted_text_is_not_swallowed() {
+        // Windows Terminal pasted the clipboard's text itself.
+        let mut d = SwallowedPasteKey::default();
+        d.on_terminal_paste();
+        assert!(!d.on_release(released(ctrl(KeyCode::Char('v')))));
+    }
+
+    #[test]
+    fn a_stale_terminal_paste_does_not_hide_a_later_swallow() {
+        // A right-click paste, then typing, then Ctrl+V with an image.
+        let mut d = SwallowedPasteKey::default();
+        d.on_terminal_paste();
+        d.on_press(key(KeyCode::Char('a')));
+        assert!(d.on_release(released(ctrl(KeyCode::Char('v')))));
+    }
+
+    #[test]
+    fn other_releases_are_never_a_swallowed_paste() {
+        let mut d = SwallowedPasteKey::default();
+        assert!(!d.on_release(released(key(KeyCode::Char('v')))));
+        assert!(!d.on_release(released(ctrl(KeyCode::Char('c')))));
+        assert!(!d.on_release(released(key(KeyCode::Enter))));
     }
 
     fn super_key(code: KeyCode) -> KeyEvent {

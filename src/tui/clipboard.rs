@@ -24,6 +24,17 @@ pub fn copy(text: &str) {
     let _ = write_osc52(text);
 }
 
+/// How the TUI's paste key reached FlightDeck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteSource {
+    /// The key itself arrived: FlightDeck does the whole paste.
+    Key,
+    /// The terminal kept the key for its own paste and only its release
+    /// arrived ([`crate::tui::input::SwallowedPasteKey`]): the terminal has
+    /// pasted any text already.
+    SwallowedKey,
+}
+
 /// What the TUI's paste key found on the system clipboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardPaste {
@@ -46,9 +57,12 @@ pub enum ClipboardPaste {
 /// text with another chord, so there Ctrl+V with no image forwards the literal
 /// key (readline's quoted-insert, vim's block select).
 ///
+/// For [`PasteSource::SwallowedKey`] the terminal has already pasted any text,
+/// so only an image the clipboard holds *without* text is returned.
+///
 /// Best effort: any failure (empty clipboard, missing tool) yields `None` so
 /// the caller can fall back to forwarding the key.
-pub fn read_clipboard_for_paste() -> Option<ClipboardPaste> {
+pub fn read_clipboard_for_paste(source: PasteSource) -> Option<ClipboardPaste> {
     // Containerized agents mount this dedicated directory read-only. Creating
     // it here also keeps local image paste self-contained when no container is
     // involved. Text paste does not need it, so a failure is not fatal.
@@ -56,10 +70,14 @@ pub fn read_clipboard_for_paste() -> Option<ClipboardPaste> {
 
     #[cfg(target_os = "windows")]
     {
-        read_clipboard_windows(paste_dir_ready)
+        read_clipboard_windows(paste_dir_ready, source)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // No terminal outside Windows reports the releases that make a key
+        // swallowed (FlightDeck does not ask for them), so `source` changes
+        // nothing here.
+        let _ = source;
         paste_dir_ready
             .then(save_clipboard_image)
             .flatten()
@@ -282,20 +300,30 @@ fn osascript_write_clipboard(path: &Path, class: &str) -> bool {
 /// UTF-8 bytes in base64, because PowerShell writes stdout in the console code
 /// page, which would mangle non-ASCII text. One run rather than two keeps the
 /// paste to a single PowerShell start-up. An empty clipboard exits non-zero.
+///
+/// For a swallowed key the terminal has pasted any text, so a clipboard with
+/// text yields nothing and text is never reported.
 #[cfg(target_os = "windows")]
-fn read_clipboard_windows(paste_dir_ready: bool) -> Option<ClipboardPaste> {
+fn read_clipboard_windows(paste_dir_ready: bool, source: PasteSource) -> Option<ClipboardPaste> {
     let path = unique_image_path("png");
     // PowerShell single-quoted literals only need `'` doubled; temp paths never
     // contain quotes in practice, but guard anyway.
     let p = path.to_string_lossy().replace('\'', "''");
     let check_image = if paste_dir_ready { "$true" } else { "$false" };
+    let swallowed = if source == PasteSource::SwallowedKey {
+        "$true"
+    } else {
+        "$false"
+    };
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
+         if ({swallowed} -and [System.Windows.Forms.Clipboard]::ContainsText()) {{ exit 1 }}; \
          $img = $null; \
          if ({check_image}) {{ $img = [System.Windows.Forms.Clipboard]::GetImage() }}; \
          if ($img -ne $null) {{ \
            try {{ $img.Save('{p}', [System.Drawing.Imaging.ImageFormat]::Png); 'image'; exit 0 }} \
            catch {{ }} }}; \
+         if ({swallowed}) {{ exit 1 }}; \
          $t = [System.Windows.Forms.Clipboard]::GetText(); \
          if ([string]::IsNullOrEmpty($t)) {{ exit 1 }}; \
          'text:' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($t)); exit 0"

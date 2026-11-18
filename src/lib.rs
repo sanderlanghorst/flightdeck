@@ -1199,6 +1199,11 @@ struct Ui {
     /// Set when a dispatched [`Effect::Quit`] asks the app to exit (e.g. the
     /// "Quit" command palette action). The event loop checks this each turn.
     should_quit: bool,
+    /// The paste key being handled is one the terminal swallowed
+    /// ([`crate::tui::input::SwallowedPasteKey`]). The terminal already pasted
+    /// any clipboard text, so the paste only attaches an image. Set by the
+    /// event loop around that one key.
+    paste_key_swallowed: bool,
     /// Active mouse text-selection drag, if the left button is held over the
     /// terminal viewport (SPECS §20).
     drag: Option<DragState>,
@@ -2347,6 +2352,7 @@ fn event_loop(terminal: &mut TuiTerminal, host: &mut AppHost) -> Result<()> {
         }
     });
 
+    let mut swallowed_paste = crate::tui::input::SwallowedPasteKey::default();
     loop {
         // --- Service every project, the relay and the pairing overlay. ---
         host.pump();
@@ -2427,9 +2433,29 @@ fn event_loop(terminal: &mut TuiTerminal, host: &mut AppHost) -> Result<()> {
 
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                swallowed_paste.on_press(key);
                 let (workspace, env, ui) = host.tui_parts();
                 if handle_key(key, workspace, env, ui)? {
                     break; // Quit requested via the Ctrl-q key action.
+                }
+            }
+            Event::Key(key) if key.kind == KeyEventKind::Repeat => {
+                swallowed_paste.on_press(key);
+            }
+            // Windows Terminal keeps Ctrl+V for itself and only lets its
+            // release through; with an image on the clipboard it pastes
+            // nothing. Handle the paste key as if it had been pressed.
+            Event::Key(key) if swallowed_paste.on_release(key) => {
+                let pressed = KeyEvent {
+                    kind: KeyEventKind::Press,
+                    ..key
+                };
+                let (workspace, env, ui) = host.tui_parts();
+                ui.paste_key_swallowed = true;
+                let quit = handle_key(pressed, workspace, env, ui);
+                ui.paste_key_swallowed = false;
+                if quit? {
+                    break;
                 }
             }
             Event::Mouse(me) => {
@@ -2441,6 +2467,7 @@ fn event_loop(terminal: &mut TuiTerminal, host: &mut AppHost) -> Result<()> {
                 handle_mouse(me, area, workspace, env, ui);
             }
             Event::Paste(data) => {
+                swallowed_paste.on_terminal_paste();
                 host.handle(HostEvent::Paste(data))?;
             }
             Event::Resize(cols, rows) => {
@@ -5529,7 +5556,12 @@ fn handle_key(key: KeyEvent, workspace: &mut Workspace, env: &Env, ui: &mut Ui) 
         // read. Same lock, different source, so it stays here.
         KeyAction::Paste => {
             if desktop_may_type(ui, env.clock.now_millis() as i64) {
-                paste_into_active_pty(&mut workspace.active_project_mut().state);
+                let source = if ui.paste_key_swallowed {
+                    crate::tui::clipboard::PasteSource::SwallowedKey
+                } else {
+                    crate::tui::clipboard::PasteSource::Key
+                };
+                paste_into_active_pty(&mut workspace.active_project_mut().state, source);
             }
             return Ok(false);
         }
@@ -9407,7 +9439,14 @@ fn write_primary_pty(state: &mut AppState, tab: usize, bytes: &[u8]) -> bool {
 /// trailing space is appended so the user can keep typing. On Windows its text
 /// is pasted otherwise, bracketed when the agent asked for that. Failing both,
 /// a literal Ctrl-V (0x16) is forwarded.
-fn paste_into_active_pty(state: &mut AppState) {
+///
+/// A key the terminal swallowed ([`PasteSource::SwallowedKey`]) only attaches
+/// an image the clipboard holds without text: the terminal already pasted any
+/// text, and it handled the key, so nothing else is sent.
+///
+/// [`PasteSource::SwallowedKey`]: crate::tui::clipboard::PasteSource::SwallowedKey
+fn paste_into_active_pty(state: &mut AppState, source: crate::tui::clipboard::PasteSource) {
+    use crate::tui::clipboard::{ClipboardPaste, PasteSource};
     let (agent, containerized) = state
         .selected()
         .map(|tab| (tab.meta.agent.as_str(), tab.meta.containerized))
@@ -9422,8 +9461,7 @@ fn paste_into_active_pty(state: &mut AppState) {
         return;
     }
 
-    use crate::tui::clipboard::ClipboardPaste;
-    match crate::tui::clipboard::read_clipboard_for_paste() {
+    match crate::tui::clipboard::read_clipboard_for_paste(source) {
         // A container cannot see the host's temp path. Fresh containers
         // bind-mount FlightDeck's dedicated paste directory at the same
         // container path, so the text names the file there.
@@ -9435,6 +9473,7 @@ fn paste_into_active_pty(state: &mut AppState) {
         // (Windows Terminal without its Ctrl+V binding, or Alt+V), so paste
         // the text as the terminal would have.
         Some(ClipboardPaste::Text(text)) => paste_text_into_active_pty(state, &text),
+        None if source == PasteSource::SwallowedKey => {}
         None => write_active_pty(state, &[0x16]),
     }
 }
