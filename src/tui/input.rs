@@ -1113,6 +1113,17 @@ mod legacy_equivalence_tests {
                             assert_eq!(legacy_map_key_with_f2(mode, key, use_f2), KeyAction::None);
                             continue;
                         }
+                        // Added since too: Alt-V pastes in a focused terminal
+                        // on Windows, where the pre-refactor mapper forwarded
+                        // it to the PTY.
+                        if platform::ALT_V_PASTES
+                            && mode == InputMode::Terminal
+                            && code == KeyCode::Char('v')
+                            && mods == KeyModifiers::ALT
+                        {
+                            assert_eq!(map_key_with_f2(mode, key, use_f2), KeyAction::Paste);
+                            continue;
+                        }
                         assert_eq!(
                             map_key_with_f2(mode, key, use_f2),
                             legacy_map_key_with_f2(mode, key, use_f2),
@@ -1139,8 +1150,11 @@ mod legacy_equivalence_tests {
     #[test]
     fn paste_matches_the_pre_refactor_predicate_on_every_platform() {
         for is_macos in [false, true] {
+            // The legacy predicate predates Windows' Alt-V paste, which
+            // `alt_v_pastes_only_when_enabled` covers on its own.
             let keymap = Keymap::new(KeymapOptions {
                 command_v_pastes: is_macos,
+                alt_v_pastes: false,
                 ..KeymapOptions::for_this_platform(false)
             });
             for code in codes() {

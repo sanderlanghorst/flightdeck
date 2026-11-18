@@ -202,6 +202,9 @@ pub struct KeymapOptions {
     pub leave_focus_uses_shift: bool,
     /// Command-V (reported as Super) pastes as well as Ctrl-V (macOS).
     pub command_v_pastes: bool,
+    /// Alt-V pastes as well as Ctrl-V (Windows, where the terminal may keep
+    /// Ctrl-V for itself).
+    pub alt_v_pastes: bool,
     /// The front-end is the GPUI desktop app, which binds a few platform
     /// chords (Cmd-C copy, Cmd-= / Cmd-- / Cmd-0 zoom) in its own view rather
     /// than through this table. Only the help screen reads it: together with
@@ -217,6 +220,7 @@ impl KeymapOptions {
             use_f2_to_leave_focus,
             leave_focus_uses_shift: crate::tui::platform::LEAVE_FOCUS_USES_SHIFT,
             command_v_pastes: crate::tui::platform::IS_MACOS,
+            alt_v_pastes: crate::tui::platform::ALT_V_PASTES,
             desktop: false,
         }
     }
@@ -549,6 +553,9 @@ fn build_entries(options: KeymapOptions) -> Vec<KeymapEntry> {
             Mods::SUPER,
             Mods::ALL.without(Mods::ALT | Mods::CTRL),
         ));
+    }
+    if options.alt_v_pastes {
+        paste.push(trigger(Terminal, Key::Char('v'), alt, exact));
     }
 
     entries.extend([

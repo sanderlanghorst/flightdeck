@@ -22,6 +22,12 @@ pub const IS_MACOS: bool = cfg!(target_os = "macos");
 /// `Alt+Esc`. Windows and Linux reserve `Alt+Esc` for cycling windows.
 pub const LEAVE_FOCUS_USES_SHIFT: bool = IS_WINDOWS || IS_LINUX;
 
+/// Whether Alt+V pastes as well as Ctrl+V. Windows Terminal's starter settings
+/// bind Ctrl+V to its own paste, which never forwards the key and pastes
+/// nothing for an image; Alt+V still reaches FlightDeck (and is the chord
+/// Claude Code uses for image paste on Windows for the same reason).
+pub const ALT_V_PASTES: bool = IS_WINDOWS;
+
 /// User-facing label for the configured leave-terminal-focus binding.
 ///
 /// Owned by the keymap table ([`crate::app::keymap::leave_focus_label`]).

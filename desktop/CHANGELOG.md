@@ -22,7 +22,7 @@ uses that version's section as the GitHub Release notes.
 
 ### Bug fixes
 
-- None yet.
+- **Alt+V pastes into a terminal on Windows, as Ctrl+V does.** The shared keymap gained the chord for Windows Terminal users of the TUI, where Ctrl+V can be taken by the terminal; the desktop app gets the same binding so both front-ends agree.
 
 ## [0.11.1] - 2026-11-04
 

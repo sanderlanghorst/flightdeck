@@ -9,13 +9,16 @@ fn all_options() -> Vec<KeymapOptions> {
     for use_f2 in [false, true] {
         for shift in [false, true] {
             for cmd_v in [false, true] {
-                for desktop in [false, true] {
-                    out.push(KeymapOptions {
-                        use_f2_to_leave_focus: use_f2,
-                        leave_focus_uses_shift: shift,
-                        command_v_pastes: cmd_v,
-                        desktop,
-                    });
+                for alt_v in [false, true] {
+                    for desktop in [false, true] {
+                        out.push(KeymapOptions {
+                            use_f2_to_leave_focus: use_f2,
+                            leave_focus_uses_shift: shift,
+                            command_v_pastes: cmd_v,
+                            alt_v_pastes: alt_v,
+                            desktop,
+                        });
+                    }
                 }
             }
         }
@@ -194,6 +197,7 @@ fn leave_focus_binding_follows_the_options() {
         use_f2_to_leave_focus: false,
         leave_focus_uses_shift: false,
         command_v_pastes: false,
+        alt_v_pastes: false,
         desktop: false,
     };
     let focus = |o: KeymapOptions, c: Chord| {
@@ -278,6 +282,27 @@ fn command_v_pastes_only_when_enabled() {
             .map(|e| e.id);
         assert_eq!(hit == Some("Paste"), o.command_v_pastes);
     }
+}
+
+#[test]
+fn alt_v_pastes_only_when_enabled() {
+    let alt_v = Chord::new(Key::Char('v'), Mods::ALT);
+    for o in all_options() {
+        let keymap = Keymap::new(o);
+        let hit = keymap.lookup(InputMode::Terminal, alt_v).map(|e| e.id);
+        assert_eq!(hit == Some("Paste"), o.alt_v_pastes, "{o:?}");
+        // Only in a focused terminal: elsewhere Alt-V is not a paste.
+        assert_ne!(
+            keymap.lookup(InputMode::App, alt_v).map(|e| e.id),
+            Some("Paste")
+        );
+    }
+}
+
+#[test]
+fn alt_v_pastes_on_windows_only() {
+    let o = KeymapOptions::for_this_platform(false);
+    assert_eq!(o.alt_v_pastes, crate::tui::platform::IS_WINDOWS);
 }
 
 #[test]

@@ -9397,14 +9397,16 @@ fn write_primary_pty(state: &mut AppState, tab: usize, bytes: &[u8]) -> bool {
     term.session_mut().write_input(bytes).is_ok()
 }
 
-/// Paste from the system clipboard into the active terminal (Ctrl-V or Cmd-V
-/// when the macOS terminal reports Command as a key modifier).
+/// Paste from the system clipboard into the active terminal (Ctrl-V; Cmd-V
+/// when the macOS terminal reports Command as a key modifier; Alt-V on
+/// Windows, where Windows Terminal may keep Ctrl-V for itself).
 ///
 /// When the clipboard holds an image, it is written to a temp file and the
 /// file path is sent to the agent — matching how a terminal inserts a path when
 /// you drag an image in, which agents like Claude Code recognise and attach. A
-/// trailing space is appended so the user can keep typing. With no image on the
-/// clipboard, a literal Ctrl-V (0x16) is forwarded, preserving prior behaviour.
+/// trailing space is appended so the user can keep typing. On Windows its text
+/// is pasted otherwise, bracketed when the agent asked for that. Failing both,
+/// a literal Ctrl-V (0x16) is forwarded.
 fn paste_into_active_pty(state: &mut AppState) {
     let (agent, containerized) = state
         .selected()
@@ -9420,14 +9422,19 @@ fn paste_into_active_pty(state: &mut AppState) {
         return;
     }
 
-    match crate::tui::clipboard::save_clipboard_image() {
+    use crate::tui::clipboard::ClipboardPaste;
+    match crate::tui::clipboard::read_clipboard_for_paste() {
         // A container cannot see the host's temp path. Fresh containers
         // bind-mount FlightDeck's dedicated paste directory at the same
         // container path, so the text names the file there.
-        Some(path) => {
+        Some(ClipboardPaste::Image(path)) => {
             let text = crate::tui::clipboard::pasted_image_text(&path, containerized);
             write_active_pty(state, text.as_bytes());
         }
+        // Windows only: the terminal left its paste key to FlightDeck
+        // (Windows Terminal without its Ctrl+V binding, or Alt+V), so paste
+        // the text as the terminal would have.
+        Some(ClipboardPaste::Text(text)) => paste_text_into_active_pty(state, &text),
         None => write_active_pty(state, &[0x16]),
     }
 }

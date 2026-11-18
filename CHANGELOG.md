@@ -16,7 +16,7 @@ Future releases should group notes under `New features`, `Improvements`, and `Bu
 
 ### Bug fixes
 
-- None yet.
+- **Pasting an image works again in Windows Terminal.** Windows Terminal's starter settings bind Ctrl+V to its own paste, which pastes nothing for an image and never passes the key on, so FlightDeck could not attach the picture. On Windows, **Alt+V** now pastes as well, and it reaches FlightDeck whatever Windows Terminal binds. On Windows, when the clipboard holds text instead of an image, FlightDeck's paste key now pastes that text (bracketed when the agent asked for it) rather than sending a bare Ctrl-V. You can therefore also remove the `ctrl+v` binding from Windows Terminal's settings and use Ctrl+V for both images and text. Non-ASCII text arrives intact. macOS and Linux are unchanged: there Ctrl+V with no image still sends the literal key.
 
 ## [1.32.0] - 2026-11-04
 

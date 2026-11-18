@@ -24,31 +24,59 @@ pub fn copy(text: &str) {
     let _ = write_osc52(text);
 }
 
-/// If the system clipboard holds an image, write it to a temp file and return
-/// its path; otherwise return `None`.
+/// What the TUI's paste key found on the system clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardPaste {
+    /// An image, saved to this file in [`image_paste_dir`].
+    Image(PathBuf),
+    /// Text, to paste as a terminal would.
+    Text(String),
+}
+
+/// Read the system clipboard for the TUI's paste key: an image, saved to a
+/// temp file, and on Windows otherwise its text.
 ///
-/// This is how FlightDeck delivers a pasted image to a hosted agent: the agent
-/// runs in a PTY and cannot see the host clipboard's image flavour, but it does
-/// understand a file-path reference (the same thing a terminal inserts when you
-/// drag an image in). The caller sends the returned path to the PTY.
+/// An image is how FlightDeck delivers a pasted picture to a hosted agent: the
+/// agent runs in a PTY and cannot see the host clipboard's image flavour, but
+/// it does understand a file-path reference (the same thing a terminal inserts
+/// when you drag an image in). On Windows text is read too, because there the
+/// paste key is the terminal's own paste key: a user frees Ctrl+V from Windows
+/// Terminal so an image can reach FlightDeck at all, and then FlightDeck has to
+/// paste text itself (Alt+V likewise). macOS and most Linux terminals paste
+/// text with another chord, so there Ctrl+V with no image forwards the literal
+/// key (readline's quoted-insert, vim's block select).
 ///
-/// Best effort: any failure (no image, missing tool) yields `None` so the caller
-/// can fall back to a normal paste.
-pub fn save_clipboard_image() -> Option<PathBuf> {
+/// Best effort: any failure (empty clipboard, missing tool) yields `None` so
+/// the caller can fall back to forwarding the key.
+pub fn read_clipboard_for_paste() -> Option<ClipboardPaste> {
     // Containerized agents mount this dedicated directory read-only. Creating
     // it here also keeps local image paste self-contained when no container is
-    // involved.
-    std::fs::create_dir_all(image_paste_dir()).ok()?;
+    // involved. Text paste does not need it, so a failure is not fatal.
+    let paste_dir_ready = std::fs::create_dir_all(image_paste_dir()).is_ok();
 
+    #[cfg(target_os = "windows")]
+    {
+        read_clipboard_windows(paste_dir_ready)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        paste_dir_ready
+            .then(save_clipboard_image)
+            .flatten()
+            .map(ClipboardPaste::Image)
+    }
+}
+
+/// If the system clipboard holds an image, write it to a temp file and return
+/// its path; otherwise return `None`. Windows reads image and text in one
+/// PowerShell run instead ([`read_clipboard_windows`]).
+#[cfg(not(target_os = "windows"))]
+fn save_clipboard_image() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         save_clipboard_image_macos()
     }
-    #[cfg(target_os = "windows")]
-    {
-        save_clipboard_image_windows()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "macos"))]
     {
         save_clipboard_image_linux()
     }
@@ -249,31 +277,62 @@ fn osascript_write_clipboard(path: &Path, class: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Windows: ask PowerShell to read an image off the clipboard and save it as a
-/// PNG. `Clipboard::GetImage` returns null when no image is present, so the
-/// script exits non-zero and we report `None`.
+/// Windows: one PowerShell run reads the clipboard. An image is saved as a PNG
+/// and reported as `image`; otherwise its text is reported as `text:` and the
+/// UTF-8 bytes in base64, because PowerShell writes stdout in the console code
+/// page, which would mangle non-ASCII text. One run rather than two keeps the
+/// paste to a single PowerShell start-up. An empty clipboard exits non-zero.
 #[cfg(target_os = "windows")]
-fn save_clipboard_image_windows() -> Option<PathBuf> {
+fn read_clipboard_windows(paste_dir_ready: bool) -> Option<ClipboardPaste> {
     let path = unique_image_path("png");
     // PowerShell single-quoted literals only need `'` doubled; temp paths never
     // contain quotes in practice, but guard anyway.
     let p = path.to_string_lossy().replace('\'', "''");
+    let check_image = if paste_dir_ready { "$true" } else { "$false" };
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
-         $img = [System.Windows.Forms.Clipboard]::GetImage(); \
-         if ($img -eq $null) {{ exit 1 }}; \
-         $img.Save('{p}', [System.Drawing.Imaging.ImageFormat]::Png); exit 0"
+         $img = $null; \
+         if ({check_image}) {{ $img = [System.Windows.Forms.Clipboard]::GetImage() }}; \
+         if ($img -ne $null) {{ \
+           try {{ $img.Save('{p}', [System.Drawing.Imaging.ImageFormat]::Png); 'image'; exit 0 }} \
+           catch {{ }} }}; \
+         $t = [System.Windows.Forms.Clipboard]::GetText(); \
+         if ([string]::IsNullOrEmpty($t)) {{ exit 1 }}; \
+         'text:' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($t)); exit 0"
     );
-    let status = Command::new("powershell")
+    let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdout(Stdio::null())
+        .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    if matches!(status, Ok(s) if s.success()) && wrote_non_empty(&path) {
-        return Some(path);
+        .output();
+    let paste = match output {
+        Ok(out) if out.status.success() => {
+            parse_windows_clipboard_output(&String::from_utf8_lossy(&out.stdout), &path)
+        }
+        _ => None,
+    };
+    if !matches!(paste, Some(ClipboardPaste::Image(_))) {
+        let _ = std::fs::remove_file(&path);
     }
-    let _ = std::fs::remove_file(&path);
-    None
+    paste
+}
+
+/// Turn [`read_clipboard_windows`]'s script output into a paste: `image` names
+/// the PNG saved at `image_path` (refused if the file is missing or empty),
+/// `text:<base64>` carries the clipboard text. Anything else is `None`.
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_clipboard_output(stdout: &str, image_path: &Path) -> Option<ClipboardPaste> {
+    use base64::Engine;
+
+    let line = stdout.trim();
+    if line == "image" {
+        return wrote_non_empty(image_path)
+            .then(|| ClipboardPaste::Image(image_path.to_path_buf()));
+    }
+    let b64 = line.strip_prefix("text:")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    (!text.is_empty()).then_some(ClipboardPaste::Text(text))
 }
 
 /// Linux: try Wayland (`wl-paste`) then X11 (`xclip`) to pull a PNG off the
@@ -408,8 +467,9 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, container_image_path, image_paste_dir, pasted_image_extension,
-        pasted_image_text, save_pasted_image, PastedImage, MAX_PASTED_IMAGE_BYTES,
+        base64_encode, container_image_path, image_paste_dir, parse_windows_clipboard_output,
+        pasted_image_extension, pasted_image_text, save_pasted_image, ClipboardPaste, PastedImage,
+        MAX_PASTED_IMAGE_BYTES,
     };
     use crate::testing::FakeFs;
     use std::path::Path;
@@ -419,6 +479,41 @@ mod tests {
             format: "png".to_string(),
             bytes,
         }
+    }
+
+    #[test]
+    fn windows_clipboard_text_survives_non_ascii() {
+        let text = "héllo → 世界\r\nline two";
+        let out = format!("text:{}\r\n", base64_encode(text.as_bytes()));
+        assert_eq!(
+            parse_windows_clipboard_output(&out, Path::new("unused.png")),
+            Some(ClipboardPaste::Text(text.to_string()))
+        );
+    }
+
+    #[test]
+    fn windows_clipboard_image_needs_a_written_file() {
+        let dir = std::env::temp_dir().join(format!("fd-clip-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let written = dir.join("written.png");
+        std::fs::write(&written, [1u8, 2, 3]).unwrap();
+        let missing = dir.join("missing.png");
+
+        assert_eq!(
+            parse_windows_clipboard_output("image\r\n", &written),
+            Some(ClipboardPaste::Image(written.clone()))
+        );
+        assert_eq!(parse_windows_clipboard_output("image", &missing), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_clipboard_rejects_empty_or_garbled_output() {
+        let p = Path::new("unused.png");
+        assert_eq!(parse_windows_clipboard_output("", p), None);
+        assert_eq!(parse_windows_clipboard_output("text:", p), None);
+        assert_eq!(parse_windows_clipboard_output("text:not base64!", p), None);
+        assert_eq!(parse_windows_clipboard_output("something else", p), None);
     }
 
     #[test]

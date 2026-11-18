@@ -49,12 +49,15 @@ fn all_options() -> Vec<KeymapOptions> {
     for use_f2 in [false, true] {
         for shift in [false, true] {
             for cmd_v in [false, true] {
-                out.push(KeymapOptions {
-                    use_f2_to_leave_focus: use_f2,
-                    leave_focus_uses_shift: shift,
-                    command_v_pastes: cmd_v,
-                    desktop: false,
-                });
+                for alt_v in [false, true] {
+                    out.push(KeymapOptions {
+                        use_f2_to_leave_focus: use_f2,
+                        leave_focus_uses_shift: shift,
+                        command_v_pastes: cmd_v,
+                        alt_v_pastes: alt_v,
+                        desktop: false,
+                    });
+                }
             }
         }
     }
@@ -112,6 +115,9 @@ fn expected_matrix(options: KeymapOptions) -> BTreeSet<(&'static str, &'static s
     rows.push(("FocusApp", "Terminal", leave_focus.into()));
     if options.command_v_pastes {
         rows.push(("Paste", "Terminal", format!("{PLATFORM_MODIFIER}-v")));
+    }
+    if options.alt_v_pastes {
+        rows.push(("Paste", "Terminal", "alt-v".into()));
     }
     rows.into_iter().collect()
 }
@@ -769,6 +775,7 @@ fn unbound_terminal_keys_send_the_tui_bytes() {
         use_f2_to_leave_focus: false,
         leave_focus_uses_shift: false,
         command_v_pastes: true,
+        alt_v_pastes: false,
         desktop: false,
     });
     let mut app = TestAppContext::single();
@@ -836,6 +843,7 @@ fn option_chords_bind_as_alt_under_either_policy() {
         use_f2_to_leave_focus: false,
         leave_focus_uses_shift: false,
         command_v_pastes: true,
+        alt_v_pastes: false,
         desktop: false,
     });
     for option in [OptionKey::Meta, OptionKey::Compose] {
@@ -891,6 +899,7 @@ fn f2_leaves_focus_only_when_enabled() {
             use_f2_to_leave_focus: use_f2,
             leave_focus_uses_shift: false,
             command_v_pastes: true,
+            alt_v_pastes: false,
             desktop: false,
         });
         let mut app = TestAppContext::single();
